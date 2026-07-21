@@ -1,0 +1,24 @@
+# Build output (rebuilt inside image)
+dist/
+
+# Dependencies (installed inside image)
+node_modules/
+
+# Test artifacts
+*.test.ts
+*.spec.ts
+e2e/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+*.DS_Store
+
+# Git
+.git/
+.gitignore

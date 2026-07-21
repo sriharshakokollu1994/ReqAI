@@ -1,0 +1,1178 @@
+openapi: 3.1.0
+
+info:
+  title: ReqAI – AI Requirement Analyzer API
+  version: 1.0.0
+  description: |
+    Enterprise REST API for ReqAI — AI-powered requirement analysis platform.
+
+    ## Authentication
+    All protected endpoints require a Bearer JWT in the `Authorization` header.
+    Obtain tokens via `POST /auth/login`. Refresh via `POST /auth/refresh` (httpOnly cookie).
+
+    ## Response Envelope
+    All responses follow a consistent envelope:
+    ```json
+    { "success": true, "data": {}, "meta": { "page": 1, "limit": 20, "total": 142 } }
+    ```
+    Errors:
+    ```json
+    { "success": false, "error": { "code": "VALIDATION_ERROR", "message": "...", "details": [] } }
+    ```
+
+  contact:
+    name: ReqAI Engineering
+    email: engineering@reqai.dev
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:3000/api/v1
+    description: Local development
+  - url: https://api.reqai.dev/v1
+    description: Production
+
+tags:
+  - name: Authentication
+    description: User registration, login, token management
+  - name: Projects
+    description: Project CRUD and member management
+  - name: Requirements
+    description: Requirement management, versioning, and linking
+  - name: Analysis
+    description: AI analysis triggering, status polling, and artifact management
+  - name: History
+    description: Paginated analysis history and saved bookmarks
+  - name: Artifacts
+    description: AI-generated artifact viewing, editing, and rating
+  - name: Export
+    description: Export analysis artifacts as PDF, Markdown, or JSON
+  - name: Health
+    description: Health, liveness, and readiness probes
+
+# ─── Security ─────────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token (15-minute expiry). Obtain via POST /auth/login.
+
+  # ─── Reusable Parameters ──────────────────────────────────────────────────────
+  parameters:
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RequirementId:
+      name: requirementId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AnalysisId:
+      name: analysisId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ArtifactId:
+      name: artifactId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  # ─── Reusable Responses ──────────────────────────────────────────────────────
+  responses:
+    Unauthorized:
+      description: Missing or invalid authentication token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            error:
+              code: UNAUTHORIZED
+              message: Authentication required
+    Forbidden:
+      description: Authenticated but lacks required permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Resource already exists or state conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body failed schema validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'
+
+  # ─── Schemas ─────────────────────────────────────────────────────────────────
+  schemas:
+
+    # Enums
+    UserRole:
+      type: string
+      enum: [ADMIN, BUSINESS_ANALYST, DEVELOPER, QA_ENGINEER, ARCHITECT, PROJECT_MANAGER]
+
+    RequirementStatus:
+      type: string
+      enum: [DRAFT, IN_ANALYSIS, ANALYZED, REVIEWED, APPROVED, ARCHIVED]
+
+    RequirementType:
+      type: string
+      enum: [FUNCTIONAL, NON_FUNCTIONAL, BUSINESS, TECHNICAL, CONSTRAINT, ASSUMPTION]
+
+    PriorityLevel:
+      type: string
+      enum: [LOW, MEDIUM, HIGH, CRITICAL]
+
+    AnalysisStatus:
+      type: string
+      enum: [QUEUED, PROCESSING, COMPLETED, FAILED, CANCELLED]
+
+    ComplexityLevel:
+      type: string
+      enum: [LOW, MEDIUM, HIGH, VERY_HIGH]
+
+    RiskSeverity:
+      type: string
+      enum: [LOW, MEDIUM, HIGH, CRITICAL]
+
+    AIProvider:
+      type: string
+      enum: [OPENAI, AZURE_OPENAI, ANTHROPIC, WATSONX, CUSTOM]
+
+    ArtifactType:
+      type: string
+      enum:
+        - USER_STORIES
+        - ACCEPTANCE_CRITERIA
+        - TEST_SCENARIOS
+        - NON_FUNCTIONAL_REQS
+        - RISKS
+        - TECHNICAL_NOTES
+        - COMPLEXITY_SCORE
+        - SUMMARY
+        - MISSING_INFO
+
+    # Response Envelope
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:    { type: string, example: NOT_FOUND }
+            message: { type: string, example: Requirement not found }
+
+    ValidationErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          properties:
+            code:    { type: string, example: VALIDATION_ERROR }
+            message: { type: string, example: Request validation failed }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:   { type: string, example: email }
+                  message: { type: string, example: Invalid email address }
+
+    PaginationMeta:
+      type: object
+      properties:
+        page:       { type: integer, example: 1 }
+        limit:      { type: integer, example: 20 }
+        total:      { type: integer, example: 142 }
+        totalPages: { type: integer, example: 8 }
+        hasNext:    { type: boolean, example: true }
+        hasPrev:    { type: boolean, example: false }
+
+    # ── Auth Schemas ──────────────────────────────────────────────────────────
+    RegisterRequest:
+      type: object
+      required: [email, password, firstName, lastName]
+      properties:
+        email:      { type: string, format: email, example: ananya@company.com }
+        password:
+          type: string
+          minLength: 8
+          description: Must contain uppercase, number, and special character
+          example: "MyP@ssw0rd!"
+        firstName:  { type: string, example: Ananya }
+        lastName:   { type: string, example: Sharma }
+        jobTitle:   { type: string, example: Senior Business Analyst }
+        department: { type: string, example: Product Engineering }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:    { type: string, format: email }
+        password: { type: string }
+
+    AuthUser:
+      type: object
+      properties:
+        id:              { type: string, format: uuid }
+        email:           { type: string, format: email }
+        firstName:       { type: string }
+        lastName:        { type: string }
+        role:            { $ref: '#/components/schemas/UserRole' }
+        isEmailVerified: { type: boolean }
+        avatarUrl:       { type: string, nullable: true }
+        jobTitle:        { type: string, nullable: true }
+        department:      { type: string, nullable: true }
+        createdAt:       { type: string, format: date-time }
+
+    LoginResponse:
+      type: object
+      properties:
+        success:     { type: boolean, example: true }
+        data:
+          type: object
+          properties:
+            accessToken: { type: string, description: JWT Bearer token (15 min) }
+            tokenType:   { type: string, example: Bearer }
+            expiresIn:   { type: integer, example: 900, description: Seconds }
+            user:        { $ref: '#/components/schemas/AuthUser' }
+
+    RefreshResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        data:
+          type: object
+          properties:
+            accessToken: { type: string }
+            tokenType:   { type: string, example: Bearer }
+            expiresIn:   { type: integer, example: 900 }
+
+    # ── Requirement Schemas ───────────────────────────────────────────────────
+    CreateRequirementRequest:
+      type: object
+      required: [title, body]
+      properties:
+        title:
+          type: string
+          minLength: 3
+          maxLength: 500
+          example: User Authentication via OAuth 2.0
+        body:
+          type: string
+          minLength: 10
+          maxLength: 50000
+          example: The system must allow users to authenticate using OAuth 2.0...
+        type:
+          $ref: '#/components/schemas/RequirementType'
+        priority:
+          $ref: '#/components/schemas/PriorityLevel'
+        source:
+          type: string
+          example: Jira-PROJ-42
+          nullable: true
+        tags:
+          type: array
+          items: { type: string }
+          example: [auth, oauth, security]
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+
+    Requirement:
+      type: object
+      properties:
+        id:            { type: string, format: uuid }
+        projectId:     { type: string, format: uuid }
+        title:         { type: string }
+        body:          { type: string }
+        type:          { $ref: '#/components/schemas/RequirementType' }
+        priority:      { $ref: '#/components/schemas/PriorityLevel' }
+        status:        { $ref: '#/components/schemas/RequirementStatus' }
+        tags:          { type: array, items: { type: string } }
+        version:       { type: integer, example: 3 }
+        wordCount:     { type: integer, example: 128 }
+        source:        { type: string, nullable: true }
+        sourceFileUrl: { type: string, nullable: true }
+        parentId:      { type: string, format: uuid, nullable: true }
+        createdBy:     { type: string, format: uuid }
+        analyzedAt:    { type: string, format: date-time, nullable: true }
+        approvedAt:    { type: string, format: date-time, nullable: true }
+        createdAt:     { type: string, format: date-time }
+        updatedAt:     { type: string, format: date-time }
+
+    RequirementListResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Requirement' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+    # ── Analysis Schemas ──────────────────────────────────────────────────────
+    TriggerAnalysisRequest:
+      type: object
+      properties:
+        context:
+          type: string
+          maxLength: 2000
+          description: Optional additional context for the AI prompt
+          nullable: true
+        forceNew:
+          type: boolean
+          default: false
+          description: Force a new analysis even if one is already in progress
+
+    TriggerAnalysisResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        data:
+          type: object
+          properties:
+            analysisId: { type: string, format: uuid }
+            status:     { type: string, example: queued }
+            jobId:      { type: string, example: "42" }
+            message:    { type: string, example: Analysis job queued. Poll /analysis/:requirementId/status for updates. }
+
+    AnalysisStatusResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        data:
+          type: object
+          properties:
+            analysisId:  { type: string, format: uuid }
+            status:      { $ref: '#/components/schemas/AnalysisStatus' }
+            progress:    { type: integer, minimum: 0, maximum: 100, example: 50 }
+            message:     { type: string, example: AI is analysing the requirement }
+            completedAt: { type: string, format: date-time, nullable: true }
+
+    Artifact:
+      type: object
+      properties:
+        id:              { type: string, format: uuid }
+        analysisId:      { type: string, format: uuid }
+        artifactType:    { $ref: '#/components/schemas/ArtifactType' }
+        content:
+          type: object
+          description: JSON payload — schema varies per artifactType
+          additionalProperties: true
+        isEdited:        { type: boolean }
+        editedBy:        { type: string, format: uuid, nullable: true }
+        editedAt:        { type: string, format: date-time, nullable: true }
+        confidenceScore: { type: number, minimum: 0, maximum: 1, nullable: true }
+        userRating:      { type: integer, minimum: 1, maximum: 5, nullable: true }
+        createdAt:       { type: string, format: date-time }
+        updatedAt:       { type: string, format: date-time }
+
+    Analysis:
+      type: object
+      properties:
+        id:               { type: string, format: uuid }
+        requirementId:    { type: string, format: uuid }
+        triggeredBy:      { type: string, format: uuid }
+        status:           { $ref: '#/components/schemas/AnalysisStatus' }
+        aiProvider:       { $ref: '#/components/schemas/AIProvider' }
+        aiModel:          { type: string, example: gpt-4o }
+        promptVersion:    { type: string, example: v1 }
+        tokensPrompt:     { type: integer, nullable: true }
+        tokensCompletion: { type: integer, nullable: true }
+        tokensTotal:      { type: integer, nullable: true }
+        costUsd:          { type: number, format: float, nullable: true }
+        durationMs:       { type: integer, nullable: true }
+        errorCode:        { type: string, nullable: true }
+        errorMessage:     { type: string, nullable: true }
+        retryCount:       { type: integer }
+        queuedAt:         { type: string, format: date-time }
+        startedAt:        { type: string, format: date-time, nullable: true }
+        completedAt:      { type: string, format: date-time, nullable: true }
+        artifacts:
+          type: array
+          items: { $ref: '#/components/schemas/Artifact' }
+
+    # ── History Schemas ───────────────────────────────────────────────────────
+    HistoryItem:
+      type: object
+      properties:
+        analysisId:       { type: string, format: uuid }
+        requirementId:    { type: string, format: uuid }
+        requirementTitle: { type: string }
+        projectId:        { type: string, format: uuid }
+        projectName:      { type: string }
+        status:           { $ref: '#/components/schemas/AnalysisStatus' }
+        aiProvider:       { $ref: '#/components/schemas/AIProvider' }
+        aiModel:          { type: string }
+        complexityLevel:  { $ref: '#/components/schemas/ComplexityLevel' }
+        riskCount:        { type: integer, nullable: true }
+        storyCount:       { type: integer, nullable: true }
+        tokensTotal:      { type: integer, nullable: true }
+        costUsd:          { type: number, nullable: true }
+        triggeredBy:      { type: string, format: uuid }
+        completedAt:      { type: string, format: date-time, nullable: true }
+
+    HistoryListResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/HistoryItem' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+    # ── Export Schema ─────────────────────────────────────────────────────────
+    AnalysisExportJson:
+      type: object
+      properties:
+        exportedAt:    { type: string, format: date-time }
+        analysisId:    { type: string, format: uuid }
+        requirementId: { type: string, format: uuid }
+        aiProvider:    { $ref: '#/components/schemas/AIProvider' }
+        aiModel:       { type: string }
+        completedAt:   { type: string, format: date-time }
+        artifacts:
+          type: array
+          items: { $ref: '#/components/schemas/Artifact' }
+
+    # ── Health Schemas ────────────────────────────────────────────────────────
+    HealthCheckResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        data:
+          type: object
+          properties:
+            status:    { type: string, enum: [ok, degraded, down] }
+            uptime:    { type: integer, description: Seconds since process start }
+            timestamp: { type: string, format: date-time }
+            version:   { type: string, example: 1.0.0 }
+            checks:
+              type: object
+              additionalProperties:
+                type: object
+                properties:
+                  status:    { type: string, enum: [ok, fail] }
+                  latencyMs: { type: integer }
+                  message:   { type: string }
+
+# ─── Paths ────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Health ────────────────────────────────────────────────────────────────
+  /health:
+    get:
+      tags: [Health]
+      summary: Full health check — DB, Redis, process uptime
+      responses:
+        "200":
+          description: All systems operational
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthCheckResponse' }
+        "503":
+          description: One or more dependencies unavailable
+
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Kubernetes liveness probe
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Kubernetes readiness probe
+      responses:
+        "200":
+          description: Ready to serve traffic
+        "503":
+          description: Not ready
+
+  # ── Authentication ────────────────────────────────────────────────────────
+  /auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a new user account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        "201":
+          description: Account created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: '#/components/schemas/AuthUser' }
+        "409": { $ref: '#/components/responses/Conflict' }
+        "422": { $ref: '#/components/responses/ValidationError' }
+
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate and receive JWT access token
+      description: |
+        Returns an access token (15 min) in the response body and sets a
+        `refreshToken` httpOnly cookie (7 days) for token rotation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example:
+              email: ananya@company.com
+              password: "MyP@ssw0rd!"
+      responses:
+        "200":
+          description: Login successful
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: refreshToken=<uuid>; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth/refresh
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "422": { $ref: '#/components/responses/ValidationError' }
+
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      summary: Rotate refresh token and issue new access token
+      description: Reads the `refreshToken` httpOnly cookie. Rotates it on every use.
+      responses:
+        "200":
+          description: New access token issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RefreshResponse' }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Invalidate refresh token and clear session cookie
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Logged out successfully
+        "401": { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get current authenticated user profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: '#/components/schemas/AuthUser' }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/forgot-password:
+    post:
+      tags: [Authentication]
+      summary: Request a password reset email
+      description: Always returns 200 to prevent email enumeration attacks.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200":
+          description: If email exists, a reset link has been sent
+
+  /auth/reset-password:
+    post:
+      tags: [Authentication]
+      summary: Reset password using a valid reset token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token:    { type: string }
+                password: { type: string, minLength: 8 }
+      responses:
+        "200":
+          description: Password reset successfully
+        "400":
+          description: Invalid or expired reset token
+
+  /auth/change-password:
+    post:
+      tags: [Authentication]
+      summary: Change password for the authenticated user
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string }
+                newPassword:     { type: string, minLength: 8 }
+      responses:
+        "204":
+          description: Password changed successfully
+        "401": { $ref: '#/components/responses/Unauthorized' }
+
+  # ── Requirements ─────────────────────────────────────────────────────────
+  /projects/{projectId}/requirements:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+
+    get:
+      tags: [Requirements]
+      summary: List requirements for a project (paginated, filterable)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/RequirementStatus' }
+        - name: type
+          in: query
+          schema: { $ref: '#/components/schemas/RequirementType' }
+        - name: priority
+          in: query
+          schema: { $ref: '#/components/schemas/PriorityLevel' }
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 300 }
+          description: Full-text search against title and body
+        - name: tags
+          in: query
+          schema: { type: string }
+          description: Comma-separated tag filter (e.g. auth,oauth)
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [createdAt, updatedAt, title, priority, status]
+            default: createdAt
+        - name: sortDir
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        "200":
+          description: Paginated requirement list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RequirementListResponse' }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+
+    post:
+      tags: [Requirements]
+      summary: Create a new requirement
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRequirementRequest' }
+      responses:
+        "201":
+          description: Requirement created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: '#/components/schemas/Requirement' }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "422": { $ref: '#/components/responses/ValidationError' }
+
+  /projects/{projectId}/requirements/upload:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [Requirements]
+      summary: Upload a requirement document (.txt, .md, .pdf — max 10 MB)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                title:
+                  type: string
+                  description: Optional override for the requirement title
+      responses:
+        "201":
+          description: Requirement created from uploaded file
+        "400":
+          description: Unsupported file type or empty file
+        "401": { $ref: '#/components/responses/Unauthorized' }
+
+  /projects/{projectId}/requirements/{requirementId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RequirementId'
+
+    get:
+      tags: [Requirements]
+      summary: Get a requirement by ID
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Requirement detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: '#/components/schemas/Requirement' }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+    put:
+      tags: [Requirements]
+      summary: Update a requirement (auto-increments version if body changes)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRequirementRequest' }
+      responses:
+        "200":
+          description: Requirement updated
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+    delete:
+      tags: [Requirements]
+      summary: Soft-delete a requirement
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Requirement archived
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+  /projects/{projectId}/requirements/{requirementId}/versions:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RequirementId'
+    get:
+      tags: [Requirements]
+      summary: Get full version history of a requirement
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of version snapshots, newest first
+
+  /projects/{projectId}/requirements/{requirementId}/links:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RequirementId'
+    post:
+      tags: [Requirements]
+      summary: Create a typed link between two requirements
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetId, linkType]
+              properties:
+                targetId:
+                  type: string
+                  format: uuid
+                linkType:
+                  type: string
+                  enum: [RELATED, DEPENDS_ON, CONFLICTS_WITH, DUPLICATES, IMPLEMENTS]
+      responses:
+        "200":
+          description: Link created
+
+  # ── Analysis ────────────────────────────────────────────────────────────
+  /projects/{projectId}/requirements/{requirementId}/analyze:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RequirementId'
+    post:
+      tags: [Analysis]
+      summary: Trigger AI analysis for a requirement
+      description: |
+        Enqueues an asynchronous AI analysis job. Returns **202 Accepted** immediately.
+        Poll `GET /requirements/{requirementId}/analysis/status` to check progress.
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TriggerAnalysisRequest' }
+      responses:
+        "202":
+          description: Analysis job queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TriggerAnalysisResponse' }
+        "409":
+          description: Analysis already in progress (use forceNew=true to override)
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+
+  /projects/{projectId}/requirements/{requirementId}/analysis:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RequirementId'
+    get:
+      tags: [Analysis]
+      summary: Get the latest completed analysis with all artifacts
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Full analysis with all 9 artifact types
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: '#/components/schemas/Analysis' }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+  /projects/{projectId}/requirements/{requirementId}/analysis/status:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RequirementId'
+    get:
+      tags: [Analysis]
+      summary: Poll analysis job status (progress 0–100)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current analysis status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnalysisStatusResponse' }
+
+  /projects/{projectId}/requirements/{requirementId}/analysis/history:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RequirementId'
+    get:
+      tags: [Analysis]
+      summary: Get all past analysis runs for a requirement
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of analysis runs, newest first
+
+  /projects/{projectId}/requirements/{requirementId}/analysis/save:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RequirementId'
+    post:
+      tags: [Analysis]
+      summary: Bookmark the latest analysis for quick access in Saved Analysis
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note:
+                  type: string
+                  maxLength: 500
+                  description: Optional personal annotation
+      responses:
+        "200":
+          description: Analysis bookmarked
+
+  # ── Artifacts ─────────────────────────────────────────────────────────────
+  /projects/{projectId}/requirements/{requirementId}/artifacts/{artifactId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RequirementId'
+      - $ref: '#/components/parameters/ArtifactId'
+    put:
+      tags: [Artifacts]
+      summary: Edit an AI-generated artifact's content
+      description: Marks `isEdited=true` and records who edited it and when.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: object
+                  additionalProperties: true
+                  description: Updated artifact content — must conform to artifactType schema
+      responses:
+        "200":
+          description: Artifact updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: '#/components/schemas/Artifact' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+  /projects/{projectId}/requirements/{requirementId}/artifacts/{artifactId}/rate:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RequirementId'
+      - $ref: '#/components/parameters/ArtifactId'
+    post:
+      tags: [Artifacts]
+      summary: Rate an AI artifact 1–5 stars (quality feedback)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rating]
+              properties:
+                rating:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+      responses:
+        "200":
+          description: Rating recorded
+
+  # ── History ───────────────────────────────────────────────────────────────
+  /history:
+    get:
+      tags: [History]
+      summary: Paginated analysis history across all user's projects
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: projectId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/AnalysisStatus' }
+        - name: provider
+          in: query
+          schema: { $ref: '#/components/schemas/AIProvider' }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [completedAt, createdAt, tokensTotal, costUsd]
+            default: completedAt
+        - name: sortDir
+          in: query
+          schema: { type: string, enum: [asc, desc], default: desc }
+      responses:
+        "200":
+          description: Paginated history list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HistoryListResponse' }
+
+  /history/saved:
+    get:
+      tags: [History]
+      summary: Get user's bookmarked analyses
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        "200":
+          description: Saved analysis list
+
+  /history/saved/{analysisId}:
+    parameters:
+      - $ref: '#/components/parameters/AnalysisId'
+    delete:
+      tags: [History]
+      summary: Remove an analysis from saved bookmarks
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Bookmark removed
+
+  # ── Export ────────────────────────────────────────────────────────────────
+  /history/export/{analysisId}/pdf:
+    parameters:
+      - $ref: '#/components/parameters/AnalysisId'
+    get:
+      tags: [Export]
+      summary: Export full analysis as PDF
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: PDF binary stream
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+              example: attachment; filename="reqai-analysis-a1b2c3d4.pdf"
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+  /history/export/{analysisId}/markdown:
+    parameters:
+      - $ref: '#/components/parameters/AnalysisId'
+    get:
+      tags: [Export]
+      summary: Export full analysis as Markdown
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Markdown file
+          content:
+            text/markdown:
+              schema: { type: string }
+
+  /history/export/{analysisId}/json:
+    parameters:
+      - $ref: '#/components/parameters/AnalysisId'
+    get:
+      tags: [Export]
+      summary: Export all artifacts as structured JSON
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: JSON export
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnalysisExportJson' }

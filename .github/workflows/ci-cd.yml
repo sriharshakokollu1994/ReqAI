@@ -1,0 +1,292 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ReqAI CI/CD Pipeline
+#
+# Triggers:
+#   push → main or develop
+#   pull_request → main or develop
+#
+# Jobs:
+#   1. backend-ci     — typecheck, lint, unit tests (with coverage)
+#   2. frontend-ci    — typecheck, lint, Vite build
+#   3. docker-build   — build + push backend & frontend images (main only)
+#   4. deploy-staging — deploy to staging via SSH (main only, after docker-build)
+#
+# Required repository secrets:
+#   DOCKERHUB_USERNAME     — Docker Hub login
+#   DOCKERHUB_TOKEN        — Docker Hub access token
+#   STAGING_HOST           — SSH hostname/IP for staging server
+#   STAGING_USER           — SSH user
+#   STAGING_SSH_KEY        — SSH private key (PEM, no passphrase)
+#   STAGING_DEPLOY_PATH    — Absolute path to the app on staging, e.g. /opt/reqai
+#   STAGING_ENV_FILE       — Contents of staging .env (injected as file)
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Cancel any previous run for the same branch/PR when a new commit is pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+  IMAGE_REGISTRY: 'docker.io'
+  IMAGE_BACKEND:  '${{ github.repository_owner }}/reqai-backend'
+  IMAGE_FRONTEND: '${{ github.repository_owner }}/reqai-frontend'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 1 — Backend CI
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  backend-ci:
+    name: Backend — Typecheck · Lint · Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: ESLint
+        run: npm run lint:check
+
+      - name: Prettier format check
+        run: npm run format:check
+
+      - name: Unit tests with coverage
+        run: npm run test:cov
+        env:
+          NODE_ENV:               test
+          DATABASE_URL:           postgresql://test:test@localhost:5432/reqai_test
+          REDIS_URL:              redis://localhost:6379
+          JWT_ACCESS_SECRET:      ${{ secrets.CI_JWT_ACCESS_SECRET || 'ci-test-access-secret-at-least-32c' }}
+          JWT_REFRESH_SECRET:     ${{ secrets.CI_JWT_REFRESH_SECRET || 'ci-test-refresh-secret-at-least-32' }}
+          JWT_ACCESS_EXPIRES_IN:  15m
+          JWT_REFRESH_EXPIRES_IN: 7d
+          AI_PROVIDER:            OPENAI
+          OPENAI_API_KEY:         sk-test-key-ci
+          OPENAI_MODEL:           gpt-4o
+          BCRYPT_ROUNDS:          4
+          FRONTEND_URL:           http://localhost:5173
+          LOG_LEVEL:              error
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage/
+          retention-days: 14
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 2 — Frontend CI
+# ─────────────────────────────────────────────────────────────────────────────
+  frontend-ci:
+    name: Frontend — Typecheck · Lint · Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: ESLint
+        run: npm run lint:check
+
+      - name: Vite production build
+        run: npm run build
+        env:
+          VITE_API_BASE_URL: /api
+
+      - name: Upload build artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 3 — Docker Build & Push (main branch only)
+# ─────────────────────────────────────────────────────────────────────────────
+  docker-build:
+    name: Docker — Build & Push Images
+    runs-on: ubuntu-latest
+    needs: [backend-ci, frontend-ci]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ── Compute tags ────────────────────────────────────────────────────────
+      # Tags: latest + short SHA (first 7 chars) for traceability
+      - name: Compute image tags
+        id: tags
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          echo "backend_tags=${{ env.IMAGE_BACKEND }}:latest,${{ env.IMAGE_BACKEND }}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "frontend_tags=${{ env.IMAGE_FRONTEND }}:latest,${{ env.IMAGE_FRONTEND }}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      # ── Build & push backend ────────────────────────────────────────────────
+      - name: Build & push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context:    ./backend
+          file:       ./backend/Dockerfile
+          target:     production
+          push:       true
+          tags:       ${{ steps.tags.outputs.backend_tags }}
+          cache-from: type=gha,scope=backend
+          cache-to:   type=gha,mode=max,scope=backend
+          labels: |
+            org.opencontainers.image.title=ReqAI Backend
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      # ── Build & push frontend ───────────────────────────────────────────────
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context:    ./frontend
+          file:       ./frontend/Dockerfile
+          target:     production
+          push:       true
+          tags:       ${{ steps.tags.outputs.frontend_tags }}
+          build-args: VITE_API_BASE_URL=/api
+          cache-from: type=gha,scope=frontend
+          cache-to:   type=gha,mode=max,scope=frontend
+          labels: |
+            org.opencontainers.image.title=ReqAI Frontend
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      # ── Summary ──────────────────────────────────────────────────────────────
+      - name: Write job summary
+        run: |
+          echo "## 🐳 Docker Images Published" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image | Tag |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-----|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`${{ env.IMAGE_BACKEND }}\` | \`${{ steps.tags.outputs.short_sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`${{ env.IMAGE_FRONTEND }}\` | \`${{ steps.tags.outputs.short_sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 4 — Deploy to Staging (main branch, after successful docker-build)
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy — Staging
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: staging
+      url:  https://staging.reqai.example.com  # Update to your real staging URL
+
+    steps:
+      - name: Checkout (for docker-compose files)
+        uses: actions/checkout@v4
+
+      # ── Install SSH key ──────────────────────────────────────────────────────
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/staging_key
+          chmod 600 ~/.ssh/staging_key
+          ssh-keyscan -H "${{ secrets.STAGING_HOST }}" >> ~/.ssh/known_hosts
+
+      # ── Write .env file for staging ──────────────────────────────────────────
+      - name: Write staging .env
+        run: echo "${{ secrets.STAGING_ENV_FILE }}" > .env.staging
+
+      # ── Copy compose + env to server ────────────────────────────────────────
+      - name: Upload docker-compose and env to staging
+        run: |
+          scp -i ~/.ssh/staging_key \
+            docker-compose.prod.yml \
+            .env.staging \
+            "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}:${{ secrets.STAGING_DEPLOY_PATH }}/"
+
+      # ── Pull new images + restart services ──────────────────────────────────
+      - name: Pull & restart services on staging
+        run: |
+          ssh -i ~/.ssh/staging_key \
+            "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}" \
+            "cd ${{ secrets.STAGING_DEPLOY_PATH }} && \
+             cp .env.staging .env && \
+             docker compose -f docker-compose.prod.yml pull && \
+             docker compose -f docker-compose.prod.yml up -d --remove-orphans && \
+             docker compose -f docker-compose.prod.yml ps"
+
+      # ── Health check after deploy ────────────────────────────────────────────
+      - name: Health check — wait for API to come up
+        run: |
+          echo "Waiting for API health endpoint..."
+          for i in $(seq 1 12); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              https://staging.reqai.example.com/api/health || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ API is healthy"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "❌ Health check timed out after 120s"
+          exit 1
+
+      # ── Summary ──────────────────────────────────────────────────────────────
+      - name: Write deploy summary
+        if: always()
+        run: |
+          echo "## 🚀 Staging Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Actor  | \`${{ github.actor }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| URL    | https://staging.reqai.example.com |" >> "$GITHUB_STEP_SUMMARY"

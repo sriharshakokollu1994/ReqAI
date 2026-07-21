@@ -1,0 +1,27 @@
+{
+  "name": "reqai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ReqAI – AI Requirement Analyzer (monorepo root)",
+  "scripts": {
+    "dev":              "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend":      "npm run dev  --prefix backend",
+    "dev:frontend":     "npm run dev  --prefix frontend",
+    "build":            "npm run build --prefix backend && npm run build --prefix frontend",
+    "install:all":      "npm install && npm install --prefix backend && npm install --prefix frontend && npm install --prefix e2e",
+    "lint":             "npm run lint --prefix backend && npm run lint --prefix frontend",
+    "typecheck":        "npm run typecheck --prefix backend && npm run typecheck --prefix frontend",
+    "test":             "npm run test --prefix backend",
+    "test:e2e":         "npm run test --prefix e2e",
+    "test:e2e:headed":  "npm run test:headed --prefix e2e",
+    "test:e2e:ui":      "npm run test:ui --prefix e2e",
+    "test:e2e:report":  "npm run test:report --prefix e2e",
+    "docker:up":        "docker compose up -d",
+    "docker:down":      "docker compose down",
+    "docker:logs":      "docker compose logs -f",
+    "docker:prod":      "docker compose -f docker-compose.prod.yml up -d"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}

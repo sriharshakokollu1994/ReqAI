@@ -1,0 +1,218 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# ReqAI – Docker Compose (Production)
+#
+# Prerequisites:
+#   1. Copy .env.production.example → .env.production and fill in all secrets.
+#   2. Place TLS certificates in ./nginx/ssl/ (or configure Let's Encrypt).
+#   3. docker compose -f docker-compose.prod.yml up -d --build
+#
+# Deployment:
+#   make deploy               # full production build + up
+#   make rollback             # re-deploy previous image tags
+#   docker compose -f docker-compose.prod.yml logs -f backend
+# ══════════════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── PostgreSQL 16 ───────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: reqai-postgres-prod
+    restart: always
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB}
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # No port exposure — only accessible from within the Docker network
+    networks:
+      - backend-net
+    healthcheck:
+      test:     ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus:   "1.0"
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ── Redis 7 ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: reqai-redis-prod
+    restart: always
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend-net
+    healthcheck:
+      test:     ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+    deploy:
+      resources:
+        limits:
+          cpus:   "0.5"
+          memory: 768M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Backend API ──────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context:    ./backend
+      dockerfile: Dockerfile
+      target:     production
+      args:
+        - BUILD_DATE=${BUILD_DATE:-unknown}
+        - GIT_COMMIT=${GIT_COMMIT:-unknown}
+    image: reqai/backend:${APP_VERSION:-latest}
+    container_name: reqai-backend-prod
+    restart: always
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV:     production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL:    redis://:${REDIS_PASSWORD}@redis:6379
+      FRONTEND_URL: https://${DOMAIN_NAME}
+    # Not exposed publicly — nginx proxies to this service
+    expose:
+      - "3000"
+    networks:
+      - backend-net
+      - frontend-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:     ["CMD", "wget", "-qO-", "http://localhost:3000/api/v1/health/live"]
+      interval: 20s
+      timeout:  10s
+      retries:  5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus:   "2.0"
+          memory: 1G
+        reservations:
+          cpus:   "0.5"
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  # ── Frontend (nginx static + SPA) ────────────────────────────────────────────
+  frontend:
+    build:
+      context:    ./frontend
+      dockerfile: Dockerfile
+      target:     production
+      args:
+        VITE_API_BASE_URL: /api/v1
+    image: reqai/frontend:${APP_VERSION:-latest}
+    container_name: reqai-frontend-prod
+    restart: always
+    expose:
+      - "80"
+    networks:
+      - frontend-net
+    depends_on:
+      backend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus:   "0.5"
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Nginx (edge reverse proxy + TLS termination) ─────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: reqai-nginx-prod
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      # Let's Encrypt certificate directory (bind-mount on host)
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # ACME challenge webroot
+      - certbot_webroot:/var/www/certbot:ro
+      # Persistent nginx logs
+      - nginx_logs:/var/log/nginx
+    networks:
+      - frontend-net
+    depends_on:
+      - backend
+      - frontend
+    healthcheck:
+      test:     ["CMD", "wget", "-qO-", "http://localhost:80/api/v1/health/live"]
+      interval: 15s
+      timeout:  5s
+      retries:  5
+    deploy:
+      resources:
+        limits:
+          cpus:   "0.5"
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "7"
+
+# ── Networks ───────────────────────────────────────────────────────────────────
+networks:
+  # Internal network: backend services (postgres, redis, api)
+  backend-net:
+    driver: bridge
+    internal: true   # No internet access for DB/cache containers
+  # DMZ network: nginx ↔ backend API ↔ frontend
+  frontend-net:
+    driver: bridge
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  nginx_logs:
+    driver: local
+  certbot_webroot:
+    driver: local
